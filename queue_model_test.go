@@ -36,8 +36,8 @@ func TestQueueModel(t *testing.T) {
 		},
 		GenCommandFunc: func(st commands.State) gopter.Gen {
 			return gen.Weighted([]gen.WeightedGen{
-				{45, genPushCommand},
-				{45, genPopCommand(st)},
+				{45, genEnqueueCommand},
+				{45, genDequeueCommand(st)},
 				{10, genCrashCommand},
 			})
 		},
@@ -48,19 +48,19 @@ func TestQueueModel(t *testing.T) {
 	properties.TestingRun(t)
 }
 
-func genPushCommand(params *gopter.GenParameters) *gopter.GenResult {
+func genEnqueueCommand(params *gopter.GenParameters) *gopter.GenResult {
 	return gopter.NewGenResult(
-		pushCommand{
+		enqueueCommand{
 			x: []byte(gen.Identifier()(params).Result.(string)),
 		},
 		gopter.NoShrinker,
 	)
 }
 
-var genPopCommand = func(st commands.State) gopter.Gen {
+var genDequeueCommand = func(st commands.State) gopter.Gen {
 	return func(params *gopter.GenParameters) *gopter.GenResult {
 		return gopter.NewGenResult(
-			popCommand{},
+			dequeueCommand{},
 			gopter.NoShrinker,
 		)
 	}
@@ -73,11 +73,11 @@ func genCrashCommand(params *gopter.GenParameters) *gopter.GenResult {
 	)
 }
 
-type pushCommand struct {
+type enqueueCommand struct {
 	x []byte
 }
 
-func (cmd pushCommand) Run(sut commands.SystemUnderTest) commands.Result {
+func (cmd enqueueCommand) Run(sut commands.SystemUnderTest) commands.Result {
 	q := sut.(*queueController).queue
 	err := q.Enqueue(cmd.x)
 	if err != nil {
@@ -86,17 +86,17 @@ func (cmd pushCommand) Run(sut commands.SystemUnderTest) commands.Result {
 	return nil
 }
 
-func (cmd pushCommand) NextState(state commands.State) commands.State {
+func (cmd enqueueCommand) NextState(state commands.State) commands.State {
 	st := state.(queueModel).clone()
-	st.Push(cmd.x)
+	st.Enqueue(cmd.x)
 	return st
 }
 
-func (cmd pushCommand) PreCondition(_ commands.State) bool {
+func (cmd enqueueCommand) PreCondition(_ commands.State) bool {
 	return true
 }
 
-func (cmd pushCommand) PostCondition(st commands.State, result commands.Result) *gopter.PropResult {
+func (cmd enqueueCommand) PostCondition(st commands.State, result commands.Result) *gopter.PropResult {
 	if e, ok := result.(error); ok {
 		return &gopter.PropResult{Error: e}
 	}
@@ -104,13 +104,13 @@ func (cmd pushCommand) PostCondition(st commands.State, result commands.Result) 
 	return gopter.NewPropResult(true, "")
 }
 
-func (cmd pushCommand) String() string {
-	return fmt.Sprintf("push(%s)", string(cmd.x))
+func (cmd enqueueCommand) String() string {
+	return fmt.Sprintf("enqueue(%s)", string(cmd.x))
 }
 
-type popCommand struct{}
+type dequeueCommand struct{}
 
-func (cmd popCommand) Run(sut commands.SystemUnderTest) commands.Result {
+func (cmd dequeueCommand) Run(sut commands.SystemUnderTest) commands.Result {
 	q := sut.(*queueController).queue
 	front, err := q.Dequeue()
 	if err != nil {
@@ -119,19 +119,19 @@ func (cmd popCommand) Run(sut commands.SystemUnderTest) commands.Result {
 	return front
 }
 
-func (cmd popCommand) NextState(state commands.State) commands.State {
+func (cmd dequeueCommand) NextState(state commands.State) commands.State {
 	st := state.(queueModel).clone()
-	st.Pop()
+	st.Dequeue()
 	return st
 }
 
-func (cmd popCommand) PostCondition(st commands.State, result commands.Result) *gopter.PropResult {
+func (cmd dequeueCommand) PostCondition(st commands.State, result commands.Result) *gopter.PropResult {
 	if e, ok := result.(error); ok {
 		return &gopter.PropResult{Error: e}
 	}
 
 	got := result.([]byte)
-	want := st.(queueModel).lastPopped
+	want := st.(queueModel).lastDequeued
 	if !bytes.Equal(got, want) {
 		return gopter.NewPropResult(false, fmt.Sprintf("%s != %s", got, want))
 	}
@@ -139,12 +139,12 @@ func (cmd popCommand) PostCondition(st commands.State, result commands.Result) *
 	return gopter.NewPropResult(true, "")
 }
 
-func (cmd popCommand) PreCondition(st commands.State) bool {
+func (cmd dequeueCommand) PreCondition(st commands.State) bool {
 	return st.(queueModel).size() > 0
 }
 
-func (cmd popCommand) String() string {
-	return "pop()"
+func (cmd dequeueCommand) String() string {
+	return "dequeue()"
 }
 
 type crashCommand struct{}
@@ -176,8 +176,8 @@ func (cmd crashCommand) String() string {
 }
 
 var (
-	_ commands.Command = pushCommand{}
-	_ commands.Command = popCommand{}
+	_ commands.Command = enqueueCommand{}
+	_ commands.Command = dequeueCommand{}
 	_ commands.Command = crashCommand{}
 )
 
@@ -194,27 +194,27 @@ func (qc *queueController) crash() {
 
 // queueModel is an in-memory model of a FIFO queue
 type queueModel struct {
-	ls         []string
-	lastPopped []byte
+	ls           []string
+	lastDequeued []byte
 }
 
 func makeQueueModel() queueModel {
 	return queueModel{ls: make([]string, 0)}
 }
 
-func (mod *queueModel) Push(x []byte) error {
+func (mod *queueModel) Enqueue(x []byte) error {
 	mod.ls = append(mod.ls, string(x))
 	return nil
 }
 
-func (mod *queueModel) Pop() ([]byte, error) {
+func (mod *queueModel) Dequeue() ([]byte, error) {
 	if len(mod.ls) <= 0 {
-		return nil, errors.New("cannot pop from empty queue")
+		return nil, errors.New("cannot dequeue from empty queue")
 	}
 
 	front := mod.ls[0]
-	mod.lastPopped = make([]byte, len(front))
-	copy(mod.lastPopped, front)
+	mod.lastDequeued = make([]byte, len(front))
+	copy(mod.lastDequeued, front)
 	mod.ls = mod.ls[1:]
 
 	return []byte(front), nil
@@ -227,7 +227,7 @@ func (mod queueModel) size() int {
 func (mod queueModel) clone() queueModel {
 	cp := make([]string, len(mod.ls))
 	copy(cp, mod.ls)
-	return queueModel{ls: cp, lastPopped: mod.lastPopped}
+	return queueModel{ls: cp, lastDequeued: mod.lastDequeued}
 }
 
 // flakyReadWriteSeeker is a io.ReadWriteSeeker middleware that

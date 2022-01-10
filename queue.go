@@ -6,31 +6,32 @@ import (
 	"io"
 )
 
-// special key that always points to the pFront of the queue
-const (
-	pFront = "front"
-	pBack  = "back"
-)
+const defaultQueueCapacity = 4096
 
-var defaultFileHeader = fileHeader{4096, 0, 16, 16}
-
-// Queue is a FIFO queue backed by LevelDB
+// Queue is a FIFO queue backed by a file
 type Queue struct {
 	rws    io.ReadWriteSeeker
 	header fileHeader // cached file header
+
+	capacity uint32
 }
 
-func NewQueue(f io.ReadWriteSeeker) *Queue {
-	q := &Queue{rws: f}
+func NewQueue(f io.ReadWriteSeeker, opts ...Option) *Queue {
+	q := &Queue{rws: f, capacity: defaultQueueCapacity}
 	if err := q.init(); err != nil {
 		panic(err)
 	}
+
+	for _, opt := range opts {
+		opt(q)
+	}
+
 	return q
 }
 
 // init will initialize Queue.rws and load any requisite in-memory state
 func (ls *Queue) init() error {
-	ls.header = defaultFileHeader
+	ls.header = ls.defaultFileHeader()
 
 	header, err := ls.readHeader()
 	if err == io.EOF {
@@ -126,7 +127,7 @@ func (ls *Queue) Dequeue() ([]byte, error) {
 	ls.header.queueSize -= 1
 
 	if ls.header.queueSize == 0 {
-		ls.header = defaultFileHeader
+		ls.header = ls.defaultFileHeader()
 	}
 
 	// Sync header updates to finalize the write
@@ -135,6 +136,10 @@ func (ls *Queue) Dequeue() ([]byte, error) {
 	}
 
 	return elementData, nil
+}
+
+func (ls *Queue) defaultFileHeader() fileHeader {
+	return fileHeader{ls.capacity, 0, 16, 16}
 }
 
 func (ls *Queue) readHeader() (fileHeader, error) {
