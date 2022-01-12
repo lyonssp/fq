@@ -75,6 +75,50 @@ func TestQueueProperties(t *testing.T) {
 		gen.SliceOf(gen.Identifier()),
 	))
 
+	properties.Property("file size never exceeds capacity", func(params *gopter.GenParameters) *gopter.PropResult {
+		capacity := gen.UInt32Range(256, 4096)(params).Result.(uint32)
+		f, err := ioutil.TempFile("", "test-*")
+		if err != nil {
+			return &gopter.PropResult{Status: gopter.PropError, Error: err}
+		}
+
+		q := NewQueue(f, WithCapacity(capacity))
+
+		for i := 0; i < 10; i++ {
+			cmd := genEnqueueDequeue(params).Result.(interface{})
+
+			switch command := cmd.(type) {
+			case enqueueCommand:
+				err := q.Enqueue(command.x)
+				if err == ErrQueueFull {
+					return &gopter.PropResult{Status: gopter.PropUndecided}
+				}
+				if err != nil {
+					return &gopter.PropResult{Status: gopter.PropError, Error: err}
+				}
+			case dequeueCommand:
+				_, err := q.Dequeue()
+				if err == ErrQueueEmpty {
+					return &gopter.PropResult{Status: gopter.PropUndecided}
+				}
+				if err != nil {
+					return &gopter.PropResult{Status: gopter.PropError, Error: err}
+				}
+			}
+		}
+
+		fi, err := f.Stat()
+		if err != nil {
+			return &gopter.PropResult{Status: gopter.PropError, Error: err}
+		}
+
+		if fi.Size() > int64(capacity) {
+			return gopter.NewPropResult(false, "file size is over capacity")
+		}
+
+		return gopter.NewPropResult(true, "")
+	})
+
 	properties.TestingRun(t)
 }
 
@@ -118,4 +162,22 @@ func TestRegressions(t *testing.T) {
 		assert.Nil(err)
 		assert.Equal([]byte("b"), front)
 	})
+}
+
+// generate one of either an enqueueCommand or dequeueCommand at random
+func genEnqueueDequeue(params *gopter.GenParameters) *gopter.GenResult {
+	genEnqueue := func(p *gopter.GenParameters) *gopter.GenResult {
+		val := gen.Identifier()(p).Result.(string)
+		return gopter.NewGenResult(enqueueCommand{[]byte(val)}, gopter.NoShrinker)
+	}
+
+	genDequeue := func(p *gopter.GenParameters) *gopter.GenResult {
+		return gopter.NewGenResult(dequeueCommand{}, gopter.NoShrinker)
+	}
+
+	if params.Rng.Intn(100)%2 == 0 {
+		return genEnqueue(params)
+	}
+
+	return genDequeue(params)
 }

@@ -27,7 +27,7 @@ func TestQueueModel(t *testing.T) {
 
 			return &queueController{
 				f:     f,
-				queue: NewQueue(f),
+				queue: NewQueue(f, WithCapacity(4096)),
 			}
 		},
 		InitialStateGen: gen.Const(makeQueueModel()),
@@ -189,7 +189,7 @@ type queueController struct {
 }
 
 func (qc *queueController) crash() {
-	qc.queue = NewQueue(qc.f)
+	qc.queue = NewQueue(qc.f, WithCapacity(qc.queue.capacity))
 }
 
 // queueModel is an in-memory model of a FIFO queue

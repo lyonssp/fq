@@ -6,7 +6,15 @@ import (
 	"io"
 )
 
-const defaultQueueCapacity = 4096
+const (
+	defaultQueueCapacity = 65536 // 64kb
+	headerSize           = 16    // 16 bytes
+)
+
+var (
+	ErrQueueFull  = errors.New("queue is full")
+	ErrQueueEmpty = errors.New("cannot dequeue from empty queue")
+)
 
 // Queue is a FIFO queue backed by a file
 type Queue struct {
@@ -18,12 +26,15 @@ type Queue struct {
 
 func NewQueue(f io.ReadWriteSeeker, opts ...Option) *Queue {
 	q := &Queue{rws: f, capacity: defaultQueueCapacity}
-	if err := q.init(); err != nil {
-		panic(err)
-	}
 
+	// apply any configuration options
 	for _, opt := range opts {
 		opt(q)
+	}
+
+	// initialize queue state
+	if err := q.init(); err != nil {
+		panic(err)
 	}
 
 	return q
@@ -71,24 +82,34 @@ func (ls *Queue) syncHeader() error {
 
 // Enqueue the value x to the back of the queue
 func (ls *Queue) Enqueue(v []byte) error {
-
-	// Write new queue element to the tail pointer
-	elem := make([]byte, 4+len(v))
-	binary.BigEndian.PutUint32(elem[:4], uint32(len(v)))
-	copy(elem[4:], v)
+	// check for queue fullness and seek to the appropriate position
+	// when we can accept a write
+	//
+	// queue is full if there is neither space at
+	// the end of the buffer nor at the front of the buffer
+	//
+	// writes do not wrap around the end of the buffer
+	// to avoid needing to write twice
+	bytesNeeded := uint32(4 + len(v))
+	if ls.tailSpaceAvailable() < bytesNeeded {
+		return ErrQueueFull
+	}
 
 	if _, err := ls.rws.Seek(int64(ls.header.tailPosition), io.SeekStart); err != nil {
 		return err
 	}
+
+	// Write new queue element
+	elem := make([]byte, bytesNeeded)
+	binary.BigEndian.PutUint32(elem[:4], uint32(len(v)))
+	copy(elem[4:], v)
 	n, err := ls.rws.Write(elem)
 	if err != nil {
 		return err
 	}
 
 	// Update local file header
-	//
-	// tail position only gets updated from the default when enqueueing into a non-empty queue
-	ls.header.tailPosition = ls.header.tailPosition + uint32(n)
+	ls.header.tailPosition += uint32(n)
 	ls.header.queueSize += 1
 
 	// Sync header updates to finalize the write
@@ -102,7 +123,7 @@ func (ls *Queue) Enqueue(v []byte) error {
 // Dequeue and return the item at the front of the queue
 func (ls *Queue) Dequeue() ([]byte, error) {
 	if ls.header.queueSize == 0 {
-		return nil, errors.New("cannot dequeue from empty queue")
+		return nil, ErrQueueEmpty
 	}
 
 	// Seek to first element
@@ -138,6 +159,10 @@ func (ls *Queue) Dequeue() ([]byte, error) {
 	return elementData, nil
 }
 
+func (ls *Queue) tailSpaceAvailable() uint32 {
+	return ls.header.fileLength - ls.header.tailPosition - 1
+}
+
 func (ls *Queue) defaultFileHeader() fileHeader {
 	return fileHeader{ls.capacity, 0, 16, 16}
 }
@@ -165,21 +190,4 @@ type fileHeader struct {
 	queueSize    uint32 // total number of elements in a queue
 	headPosition uint32 // offset at which the first-in element can be found
 	tailPosition uint32 // offset at which the last-in  element can be found
-}
-
-func (header fileHeader) MarshalBinary() ([]byte, error) {
-	b := make([]byte, 16)
-	binary.BigEndian.PutUint32(b[:4], header.fileLength)
-	binary.BigEndian.PutUint32(b[4:8], header.queueSize)
-	binary.BigEndian.PutUint32(b[8:12], header.headPosition)
-	binary.BigEndian.PutUint32(b[12:], header.tailPosition)
-	return b, nil
-}
-
-func (header *fileHeader) UnmarshalBinary(bs []byte) error {
-	header.fileLength = binary.BigEndian.Uint32(bs[:4])
-	header.queueSize = binary.BigEndian.Uint32(bs[4:8])
-	header.headPosition = binary.BigEndian.Uint32(bs[8:12])
-	header.tailPosition = binary.BigEndian.Uint32(bs[12:])
-	return nil
 }
