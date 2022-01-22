@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	defaultQueueCapacity = 65536 // 64kb
-	headerSize           = 16    // 16 bytes
+	headerLength        uint32 = 16 // 16 bytes
+	elementHeaderLength uint32 = 8  // 4 next pointer bytes + 4 size bytes
 )
 
 var (
@@ -20,17 +20,10 @@ var (
 type Queue struct {
 	rws    io.ReadWriteSeeker
 	header fileHeader // cached file header
-
-	capacity uint32
 }
 
-func NewQueue(f io.ReadWriteSeeker, opts ...Option) *Queue {
-	q := &Queue{rws: f, capacity: defaultQueueCapacity}
-
-	// apply any configuration options
-	for _, opt := range opts {
-		opt(q)
-	}
+func NewQueue(f io.ReadWriteSeeker) *Queue {
+	q := &Queue{rws: f}
 
 	// initialize queue state
 	if err := q.init(); err != nil {
@@ -80,8 +73,17 @@ func (ls *Queue) syncHeader() error {
 	return nil
 }
 
-// Enqueue the value x to the back of the queue
+// Enqueue will add a value to the queue
+//
+// If there is inadequate space between the tail position and the
+// nearest boundary, where the boundary is either the end of the file
+// or the position of the head element
 func (ls *Queue) Enqueue(v []byte) error {
+	bytesNeeded := uint32(4 + len(v))
+	if bytesNeeded > ls.header.fileLength {
+		return errors.New("element is too large to enqueue")
+	}
+
 	// check for queue fullness and seek to the appropriate position
 	// when we can accept a write
 	//
@@ -90,12 +92,16 @@ func (ls *Queue) Enqueue(v []byte) error {
 	//
 	// writes do not wrap around the end of the buffer
 	// to avoid needing to write twice
-	bytesNeeded := uint32(4 + len(v))
-	if ls.tailSpaceAvailable() < bytesNeeded {
+	var writePosition int64
+	if bytesNeeded <= ls.tailSpaceAvailable() {
+		writePosition = int64(ls.header.tailPosition)
+	} else if bytesNeeded <= ls.headSpaceAvailable() {
+		writePosition = int64(headerLength)
+	} else {
 		return ErrQueueFull
 	}
 
-	if _, err := ls.rws.Seek(int64(ls.header.tailPosition), io.SeekStart); err != nil {
+	if _, err := ls.rws.Seek(writePosition, io.SeekStart); err != nil {
 		return err
 	}
 
@@ -159,12 +165,23 @@ func (ls *Queue) Dequeue() ([]byte, error) {
 	return elementData, nil
 }
 
+func (ls *Queue) headSpaceAvailable() uint32 {
+	if ls.header.tailPosition < ls.header.headPosition {
+		return ls.header.headPosition - ls.header.tailPosition
+	}
+	return ls.header.headPosition - headerLength
+}
+
 func (ls *Queue) tailSpaceAvailable() uint32 {
-	return ls.header.fileLength - ls.header.tailPosition - 1
+	// if queue is wrapped around the end of the buffer
+	if ls.header.tailPosition < ls.header.headPosition {
+		return ls.header.headPosition - ls.header.tailPosition
+	}
+	return ls.header.fileLength - ls.header.tailPosition
 }
 
 func (ls *Queue) defaultFileHeader() fileHeader {
-	return fileHeader{ls.capacity, 0, 16, 16}
+	return fileHeader{4096, 0, 16, 16}
 }
 
 func (ls *Queue) readHeader() (fileHeader, error) {
@@ -183,6 +200,17 @@ func (ls *Queue) readHeader() (fileHeader, error) {
 		headPosition: binary.BigEndian.Uint32(headerBytes[8:12]),
 		tailPosition: binary.BigEndian.Uint32(headerBytes[12:]),
 	}, nil
+}
+
+func (ls *Queue) readElementHeader(pos uint32) (uint32, error) {
+	if _, err := ls.rws.Seek(int64(pos), io.SeekStart); err != nil {
+		return 0, err
+	}
+	var header [4]byte
+	if _, err := ls.rws.Read(header[:]); err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint32(header[:]), nil
 }
 
 type fileHeader struct {

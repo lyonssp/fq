@@ -76,13 +76,12 @@ func TestQueueProperties(t *testing.T) {
 	))
 
 	properties.Property("file size never exceeds capacity", func(params *gopter.GenParameters) *gopter.PropResult {
-		capacity := gen.UInt32Range(256, 4096)(params).Result.(uint32)
 		f, err := ioutil.TempFile("", "test-*")
 		if err != nil {
 			return &gopter.PropResult{Status: gopter.PropError, Error: err}
 		}
 
-		q := NewQueue(f, WithCapacity(capacity))
+		q := NewQueue(f)
 
 		for i := 0; i < 10; i++ {
 			cmd := genEnqueueDequeue(params).Result.(interface{})
@@ -112,7 +111,7 @@ func TestQueueProperties(t *testing.T) {
 			return &gopter.PropResult{Status: gopter.PropError, Error: err}
 		}
 
-		if fi.Size() > int64(capacity) {
+		if fi.Size() > int64(q.header.fileLength) {
 			return gopter.NewPropResult(false, "file size is over capacity")
 		}
 
@@ -145,7 +144,6 @@ func TestRegressions(t *testing.T) {
 		front, err := q.Dequeue()
 		assert.Nil(err)
 		assert.Equal([]byte("t"), front)
-
 	})
 
 	t.Run("regression 1", func(t *testing.T) {
